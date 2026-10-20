@@ -1,0 +1,28 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Environment variables and secrets
+.env
+.env.*
+
+# Generated audio
+audio/
+*.wav
+*.mp3
+
+# Downloaded AI models
+pretrained_models/
+*.onnx
+*.pth
+*.pt
+
+# Editor and operating-system files
+.vscode/
+.DS_Store
+Thumbs.db
