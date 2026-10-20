@@ -4,3 +4,9 @@ uvicorn[standard]
 python-multipart
 opencv-python-headless
 pytesseract
+numpy
+scipy
+soundfile
+torch
+speechbrain
+piper-tts
