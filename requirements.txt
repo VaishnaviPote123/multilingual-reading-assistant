@@ -10,3 +10,4 @@ soundfile
 torch
 speechbrain
 piper-tts
+langdetect
