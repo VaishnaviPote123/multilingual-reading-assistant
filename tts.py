@@ -1,3 +1,4 @@
+
 import logging
 import os
 import re
@@ -16,13 +17,17 @@ from language import (
 
 logger = logging.getLogger(__name__)
 
+# --------------------------------------------------
+# CONFIGURATION
+# --------------------------------------------------
+
 BASE_DIR = Path(__file__).resolve().parent
-VOICE_DIR = BASE_DIR / "voices"
-AUDIO_DIR = BASE_DIR / "audio"
+VOICE_DIR = (BASE_DIR / "voices").resolve()
+AUDIO_DIR = (BASE_DIR / "audio").resolve()
 
 AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 
-# Piper voice models
+# These filenames must exactly match the files in server/voices/.
 VOICE_MODELS = {
     "english": "en_US-lessac-medium.onnx",
     "hindi": "hi_IN-pratham-medium.onnx",
@@ -30,63 +35,131 @@ VOICE_MODELS = {
 }
 
 
+# --------------------------------------------------
+# TEXT AND LANGUAGE HELPERS
+# --------------------------------------------------
+
 def clean_text(text):
-    """Clean text while preserving valid English and Devanagari characters."""
+    """Clean text while preserving English and Devanagari characters."""
     if not isinstance(text, str):
         text = str(text)
 
-    # Remove invalid Unicode surrogates.
+    # Replace invalid Unicode surrogate characters.
     text = text.encode("utf-8", errors="replace").decode("utf-8")
 
-    # Remove unwanted control characters while preserving whitespace.
+    # Remove unwanted control characters.
     text = "".join(
-        char
-        for char in text
+        char for char in text
         if char in "\n\t\r" or ord(char) >= 32
     )
 
-    # Normalize spaces and tabs without removing language characters.
+    # Normalize repeated spaces and tabs.
     text = re.sub(r"[ \t]+", " ", text)
 
     return text.strip()
 
 
 def normalize_language(language, text=""):
-    """Convert a language label into a supported Piper voice key."""
+    """Normalize language labels to supported voice keys."""
     language = (language or "").strip().lower()
 
-    if language in SUPPORTED_LANGUAGES:
-        return language
+    aliases = {
+        "en": "english",
+        "eng": "english",
+        "english": "english",
+        "hi": "hindi",
+        "hin": "hindi",
+        "hindi": "hindi",
+        "mr": "marathi",
+        "mar": "marathi",
+        "marathi": "marathi",
+    }
 
-    # Backward compatibility with older language.py labels.
-    if language in {
+    normalized = aliases.get(language, language)
+
+    supported = set(SUPPORTED_LANGUAGES)
+    supported.update(VOICE_MODELS.keys())
+
+    if normalized in supported and normalized in VOICE_MODELS:
+        return normalized
+
+    # Infer Hindi or Marathi for older/ambiguous language labels.
+    if normalized in {
         "hindi_or_marathi",
         "devanagari",
         "unknown",
+        "",
     }:
         detected = detect_devanagari_language(text)
+        detected = aliases.get(
+            (detected or "").strip().lower(),
+            (detected or "").strip().lower(),
+        )
 
-        if detected in SUPPORTED_LANGUAGES:
+        if detected in VOICE_MODELS:
             return detected
 
     raise ValueError(
         f"Unsupported language: {language!r}. "
-        f"Expected one of {sorted(SUPPORTED_LANGUAGES)}"
+        f"Supported languages: {', '.join(VOICE_MODELS.keys())}"
     )
 
 
+# --------------------------------------------------
+# PIPER CONFIGURATION
+# --------------------------------------------------
+
 def get_piper_command():
-    """Locate Piper on Windows or use its Python module."""
+    """Find Piper executable or use its Python module."""
     executable = shutil.which("piper")
 
     if executable:
         return [executable]
 
+    # Fallback for installations exposing Piper as a Python module.
     return [sys.executable, "-m", "piper"]
 
 
+def get_voice_model(language, text=""):
+    """Validate and return the selected Piper model path."""
+    language = normalize_language(language, text)
+
+    model_path = (VOICE_DIR / VOICE_MODELS[language]).resolve()
+    config_path = Path(str(model_path) + ".json")
+
+    if not VOICE_DIR.is_dir():
+        raise FileNotFoundError(
+            f"Voices directory does not exist: {VOICE_DIR}"
+        )
+
+    if not model_path.is_file():
+        available = sorted(
+            path.name for path in VOICE_DIR.iterdir()
+            if path.is_file()
+        )
+
+        raise FileNotFoundError(
+            f"Voice model not found: {model_path}. "
+            f"Files currently in voices directory: {available}. "
+            "Add the required .onnx model to the voices directory "
+            "and rebuild/redeploy the Docker image."
+        )
+
+    if not config_path.is_file():
+        raise FileNotFoundError(
+            f"Voice configuration not found: {config_path}. "
+            "The matching .onnx.json file is required."
+        )
+
+    return model_path
+
+
+# --------------------------------------------------
+# WAV VALIDATION
+# --------------------------------------------------
+
 def validate_wav(output_path):
-    """Check that a generated WAV contains valid audio."""
+    """Verify that a WAV file exists and contains audio."""
     output_path = Path(output_path)
 
     if not output_path.is_file() or output_path.stat().st_size == 0:
@@ -116,26 +189,24 @@ def validate_wav(output_path):
     return output_path
 
 
+# --------------------------------------------------
+# GENERATE ONE LANGUAGE SEGMENT
+# --------------------------------------------------
+
 def generate_segment_speech(text, language, output_path):
-    """Generate a single English, Hindi, or Marathi WAV segment."""
+    """Generate a WAV file for one English, Hindi, or Marathi segment."""
     text = clean_text(text)
 
     if not text:
         raise ValueError("Text is empty after cleaning.")
 
     language = normalize_language(language, text)
+    model_path = get_voice_model(language, text)
 
-    model_path = VOICE_DIR / VOICE_MODELS[language]
     output_path = Path(output_path)
-
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if not model_path.is_file():
-        raise FileNotFoundError(
-            f"Voice model not found: {model_path}"
-        )
-
-    # Remove stale output before synthesis.
+    # Remove any old output before generating a new file.
     if output_path.exists():
         output_path.unlink()
 
@@ -146,14 +217,13 @@ def generate_segment_speech(text, language, output_path):
         str(output_path),
     ]
 
-    # IMPORTANT:
-    # PYTHONUTF8=1 fixed the Hindi Unicode error in your direct test.
-    # Pass it to Piper every time this function launches a subprocess.
+    # Preserve UTF-8 text handling for Hindi and Marathi.
     process_env = os.environ.copy()
     process_env["PYTHONUTF8"] = "1"
+    process_env["PYTHONIOENCODING"] = "utf-8"
 
     logger.info(
-        "Generating %s speech using %s",
+        "Generating %s speech using model %s",
         language,
         model_path.name,
     )
@@ -175,13 +245,9 @@ def generate_segment_speech(text, language, output_path):
             logger.debug("Piper stderr: %s", result.stderr)
 
     except subprocess.CalledProcessError as exc:
-        error_message = exc.stderr or exc.stdout or str(exc)
-
-        if isinstance(error_message, bytes):
-            error_message = error_message.decode(
-                "utf-8",
-                errors="replace",
-            )
+        error_message = (
+            exc.stderr or exc.stdout or str(exc)
+        )
 
         try:
             output_path.unlink(missing_ok=True)
@@ -189,7 +255,7 @@ def generate_segment_speech(text, language, output_path):
             pass
 
         logger.error(
-            "Piper failed for %s:\n%s",
+            "Piper failed for %s: %s",
             language,
             error_message,
         )
@@ -208,28 +274,28 @@ def generate_segment_speech(text, language, output_path):
         logger.exception("Could not start Piper.")
 
         raise RuntimeError(
-            f"Could not start Piper: {exc}"
+            f"Could not start Piper. Ensure Piper is installed "
+            f"and available to the server: {exc}"
         ) from exc
 
     validate_wav(output_path)
 
-    logger.info(
-        "Generated %s speech successfully: %s",
-        language,
-        output_path,
-    )
+    logger.info("Generated audio successfully: %s", output_path)
 
     return output_path
 
 
+# --------------------------------------------------
+# COMBINE WAV SEGMENTS
+# --------------------------------------------------
+
 def combine_wav_files(input_paths, output_path):
-    """Combine WAV segments with matching audio formats."""
+    """Combine WAV segments that share the same audio format."""
     if not input_paths:
         raise ValueError("No audio segments were generated.")
 
     input_paths = [Path(path) for path in input_paths]
     output_path = Path(output_path)
-
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     for input_path in input_paths:
@@ -271,12 +337,11 @@ def combine_wav_files(input_paths, output_path):
                     if actual_format != expected_format:
                         raise ValueError(
                             f"WAV formats differ for {input_path}. "
-                            "Audio segments must have matching "
-                            "channels, sample widths, sample rates, "
-                            "and compression formats."
+                            "All segments must have matching channels, "
+                            "sample widths, sample rates, and "
+                            "compression formats."
                         )
 
-                    # Append audio frames in the original segment order.
                     output.writeframes(
                         source.readframes(source.getnframes())
                     )
@@ -284,12 +349,10 @@ def combine_wav_files(input_paths, output_path):
         validate_wav(output_path)
 
     except Exception:
-        # Avoid leaving an incomplete combined audio file.
         try:
             output_path.unlink(missing_ok=True)
         except OSError:
             pass
-
         raise
 
     logger.info("Combined audio saved: %s", output_path)
@@ -297,12 +360,22 @@ def combine_wav_files(input_paths, output_path):
     return output_path
 
 
+# --------------------------------------------------
+# MIXED-LANGUAGE SPEECH
+# --------------------------------------------------
+
 def generate_mixed_speech(text, output_path):
     """
     Convert mixed English, Hindi, and Marathi text into one WAV file.
 
-    Maintains compatibility with:
+    Compatible with:
         generate_mixed_speech(extracted_text, audio_path)
+
+    split_mixed_text() should return segments like:
+        [
+            {"text": "Hello", "language": "english"},
+            {"text": "नमस्ते", "language": "hindi"},
+        ]
     """
     text = clean_text(text)
 
@@ -363,7 +436,7 @@ def generate_mixed_speech(text, output_path):
         return str(output_path)
 
     finally:
-        # Delete temporary segments but preserve the final combined WAV.
+        # Keep the final WAV; remove temporary segment files.
         for segment_path in segment_paths:
             try:
                 segment_path.unlink(missing_ok=True)

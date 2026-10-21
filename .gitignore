@@ -18,7 +18,9 @@ audio/
 
 # Downloaded AI models
 pretrained_models/
+# Ignore ONNX files by default, but include Piper voice models
 *.onnx
+!voices/*.onnx
 *.pth
 *.pt
 
