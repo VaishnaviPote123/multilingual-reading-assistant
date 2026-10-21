@@ -6,7 +6,7 @@ ENV PYTHONDONTWRITEBYTECODE=1
 
 WORKDIR /app
 
-# Install OCR engine and English, Hindi, Marathi data
+# Install Tesseract OCR and English, Hindi, and Marathi language data
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tesseract-ocr \
     tesseract-ocr-eng \
@@ -15,10 +15,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
+# Verify that Tesseract and all required languages are installed
+RUN tesseract --version && \
+    tesseract --list-langs
+
+# Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Copy application source code
 COPY . .
 
-# Render supplies PORT at runtime
-CMD uvicorn main:app --host 0.0.0.0 --port ${PORT:-10000}
+# Start FastAPI using the port provided by Render
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-10000}"]
