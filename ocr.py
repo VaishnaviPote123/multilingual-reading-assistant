@@ -2,6 +2,7 @@
 import logging
 import os
 import shutil
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -15,45 +16,51 @@ logger = logging.getLogger(__name__)
 # TESSERACT CONFIGURATION
 # --------------------------------------------------
 
-if os.name == "nt":
-    # Windows: local development in VS Code
-    windows_tesseract = (
-        r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-    )
+def configure_tesseract():
+    """Configure Tesseract for Windows, Docker, and Render."""
 
-    if os.path.isfile(windows_tesseract):
-        pytesseract.pytesseract.tesseract_cmd = windows_tesseract
-    else:
-        # Fall back to Tesseract available on Windows PATH
-        detected_tesseract = shutil.which("tesseract")
+    if os.name == "nt":
+        # Windows: local development in VS Code
+        windows_tesseract = (
+            r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+        )
 
-        if detected_tesseract:
-            pytesseract.pytesseract.tesseract_cmd = (
-                detected_tesseract
-            )
+        if os.path.isfile(windows_tesseract):
+            tesseract_path = windows_tesseract
         else:
-            raise RuntimeError(
-                "Tesseract OCR was not found. Install Tesseract "
-                "or add it to your Windows PATH."
-            )
+            # Fallback: search Windows PATH
+            tesseract_path = shutil.which("tesseract")
 
-else:
-    # Linux: Docker and Render
-    detected_tesseract = shutil.which("tesseract")
+            if not tesseract_path:
+                raise RuntimeError(
+                    "Tesseract OCR was not found on Windows. "
+                    "Expected: "
+                    + windows_tesseract
+                    + ". Install Tesseract or add it to PATH."
+                )
 
-    if detected_tesseract:
-        pytesseract.pytesseract.tesseract_cmd = (
-            detected_tesseract
-        )
     else:
-        pytesseract.pytesseract.tesseract_cmd = (
-            "/usr/bin/tesseract"
-        )
+        # Linux: Docker and Render
+        tesseract_path = shutil.which("tesseract")
 
-        if not os.path.isfile("/usr/bin/tesseract"):
-            raise RuntimeError(
-                "Tesseract OCR is not installed in this environment."
-            )
+        if not tesseract_path:
+            linux_tesseract = "/usr/bin/tesseract"
+
+            if os.path.isfile(linux_tesseract):
+                tesseract_path = linux_tesseract
+            else:
+                raise RuntimeError(
+                    "Tesseract OCR is not installed in this "
+                    "Linux environment. Install it in the "
+                    "Dockerfile using apt-get."
+                )
+
+    pytesseract.pytesseract.tesseract_cmd = tesseract_path
+
+    logger.info("Tesseract executable: %s", tesseract_path)
+
+
+configure_tesseract()
 
 
 # --------------------------------------------------
@@ -62,24 +69,29 @@ else:
 
 OCR_LANGUAGES = "eng+hin+mar"
 
+REQUIRED_LANGUAGES = {"eng", "hin", "mar"}
+
 
 def verify_ocr_setup():
-    """Verify Tesseract and the required language data."""
+    """Verify Tesseract and all required language data."""
+
     try:
         version = pytesseract.get_tesseract_version()
+
         installed_languages = set(
             pytesseract.get_languages(config="")
         )
 
-        required_languages = {"eng", "hin", "mar"}
         missing_languages = (
-            required_languages - installed_languages
+            REQUIRED_LANGUAGES - installed_languages
         )
 
         if missing_languages:
             raise RuntimeError(
                 "Missing Tesseract language data: "
                 + ", ".join(sorted(missing_languages))
+                + ". Install the corresponding Tesseract "
+                "language packages in the Dockerfile."
             )
 
         logger.info("Tesseract version: %s", version)
@@ -88,8 +100,12 @@ def verify_ocr_setup():
             OCR_LANGUAGES,
         )
 
+        return True
+
     except Exception:
-        logger.exception("Tesseract OCR setup verification failed")
+        logger.exception(
+            "Tesseract OCR setup verification failed"
+        )
         raise
 
 
@@ -98,10 +114,17 @@ def verify_ocr_setup():
 # --------------------------------------------------
 
 def preprocess_image(image):
-    """Convert the image to grayscale and enlarge small images."""
+    """Convert an image to grayscale and enlarge small images."""
+
+    if image is None or image.size == 0:
+        raise ValueError("The input image is empty or invalid.")
+
     height, width = image.shape[:2]
 
-    # Enlarge small images to improve character recognition.
+    if height == 0 or width == 0:
+        raise ValueError("The input image has invalid dimensions.")
+
+    # Enlarge small images to improve OCR accuracy.
     if max(height, width) < 1400:
         image = cv2.resize(
             image,
@@ -122,6 +145,7 @@ def preprocess_image(image):
 
 def run_ocr(image, psm=6):
     """Extract text and calculate average OCR confidence."""
+
     config = f"--oem 1 --psm {psm}"
 
     data = pytesseract.image_to_data(
@@ -172,30 +196,45 @@ def run_ocr(image, psm=6):
 
 def extract_text_from_bytes(image_bytes):
     """Extract English, Hindi, and Marathi text from image bytes."""
+
     if not image_bytes:
         raise ValueError("The uploaded image is empty.")
 
-    encoded = np.frombuffer(image_bytes, dtype=np.uint8)
-    image = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+    encoded = np.frombuffer(
+        image_bytes,
+        dtype=np.uint8,
+    )
+
+    image = cv2.imdecode(
+        encoded,
+        cv2.IMREAD_COLOR,
+    )
 
     if image is None:
         raise ValueError(
-            "Could not read the image. Upload a valid JPG or PNG."
+            "Could not read the image. "
+            "Upload a valid JPG, JPEG, or PNG image."
         )
 
     processed = preprocess_image(image)
 
     # First attempt: standard document layout.
-    best_text, best_score = run_ocr(processed, psm=6)
+    best_text, best_score = run_ocr(
+        processed,
+        psm=6,
+    )
 
     logger.info(
         "OCR pass 1: PSM=6, confidence=%.2f",
         best_score,
     )
 
-    # Retry if no text is detected or confidence is low.
+    # Retry using sparse-text layout if necessary.
     if not best_text or best_score < 45:
-        retry_text, retry_score = run_ocr(processed, psm=11)
+        retry_text, retry_score = run_ocr(
+            processed,
+            psm=11,
+        )
 
         logger.info(
             "OCR retry: PSM=11, confidence=%.2f",
@@ -210,7 +249,8 @@ def extract_text_from_bytes(image_bytes):
 
     if not best_text:
         raise RuntimeError(
-            "No text detected. Try a clearer image with better lighting."
+            "No text detected. Try a clearer image "
+            "with better lighting and less blur."
         )
 
     logger.info(
