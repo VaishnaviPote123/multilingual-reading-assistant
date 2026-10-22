@@ -28,7 +28,7 @@ from gan import enhance_audio
 
 app = FastAPI(title="ESP32 Multilingual Reading Assistant")
 
-ENABLE_GAN = True
+ENABLE_GAN = FALSE
 
 AUDIO_DIR = Path(AUDIO_DIR).resolve()
 AUDIO_DIR.mkdir(parents=True, exist_ok=True)
