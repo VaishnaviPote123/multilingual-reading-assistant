@@ -19,7 +19,6 @@ logger = logging.getLogger(__name__)
 from ocr import extract_text_from_bytes
 from language import split_mixed_text
 from tts import generate_mixed_speech, AUDIO_DIR
-from gan import enhance_audio
 
 
 # --------------------------------------------------
@@ -28,7 +27,9 @@ from gan import enhance_audio
 
 app = FastAPI(title="ESP32 Multilingual Reading Assistant")
 
-ENABLE_GAN = FALSE
+# Disable GAN to reduce startup memory usage.
+# Python booleans must be True or False, not TRUE or FALSE.
+ENABLE_GAN = False
 
 AUDIO_DIR = Path(AUDIO_DIR).resolve()
 AUDIO_DIR.mkdir(parents=True, exist_ok=True)
@@ -57,7 +58,6 @@ def home():
 
 @app.post("/upload")
 async def upload_image(file: UploadFile = File(...)):
-
     request_id = uuid.uuid4().hex[:12]
     total_start = time.perf_counter()
 
@@ -69,9 +69,8 @@ async def upload_image(file: UploadFile = File(...)):
     )
 
     try:
-        # 1. Validate upload
+        # 1. Validate upload.
         if not file.content_type or not file.content_type.startswith("image/"):
-            logger.warning("[%s] Rejected: uploaded file is not an image", request_id)
             raise HTTPException(
                 status_code=400,
                 detail="Please upload an image file.",
@@ -80,7 +79,6 @@ async def upload_image(file: UploadFile = File(...)):
         image_bytes = await file.read()
 
         if not image_bytes:
-            logger.warning("[%s] Rejected: uploaded image is empty", request_id)
             raise HTTPException(
                 status_code=400,
                 detail="The uploaded image is empty.",
@@ -92,7 +90,7 @@ async def upload_image(file: UploadFile = File(...)):
             len(image_bytes) / 1024,
         )
 
-        # 2. OCR
+        # 2. OCR.
         logger.info("[%s] OCR started", request_id)
         ocr_start = time.perf_counter()
 
@@ -113,7 +111,7 @@ async def upload_image(file: UploadFile = File(...)):
                 detail="No readable text found. Try a clearer image.",
             )
 
-        # 3. Language detection and segmentation
+        # 3. Language detection and segmentation.
         logger.info("[%s] Language segmentation started", request_id)
         language_start = time.perf_counter()
 
@@ -134,12 +132,14 @@ async def upload_image(file: UploadFile = File(...)):
                 detail="No readable language segments were detected.",
             )
 
-        # 4. Text-to-speech
+        # 4. Generate speech.
         audio_name = f"mixed_audio_{uuid.uuid4().hex}.wav"
         audio_path = (AUDIO_DIR / audio_name).resolve()
 
         if audio_path.parent != AUDIO_DIR:
-            raise RuntimeError("Generated audio path is outside the audio directory.")
+            raise RuntimeError(
+                "Generated audio path is outside the audio directory."
+            )
 
         logger.info("[%s] TTS started | output=%s", request_id, audio_name)
         tts_start = time.perf_counter()
@@ -168,12 +168,13 @@ async def upload_image(file: UploadFile = File(...)):
             audio_path.stat().st_size / 1024,
         )
 
-        # Keep original audio as the fallback.
+        # Original audio is the fallback.
         response_audio_name = audio_name
         gan_time = 0.0
         gan_status = "disabled"
 
-        # 5. Optional GAN enhancement
+        # 5. Optional GAN enhancement.
+        # Import the GAN module only when enhancement is enabled.
         if ENABLE_GAN:
             enhanced_name = f"enhanced_{audio_name}"
             enhanced_path = (AUDIO_DIR / enhanced_name).resolve()
@@ -182,6 +183,8 @@ async def upload_image(file: UploadFile = File(...)):
             gan_start = time.perf_counter()
 
             try:
+                from gan import enhance_audio
+
                 result_path = enhance_audio(audio_path, enhanced_path)
 
                 if result_path is None:
@@ -229,7 +232,7 @@ async def upload_image(file: UploadFile = File(...)):
                     gan_status,
                 )
 
-        # 6. Determine detected languages
+        # 6. Determine detected languages.
         languages = list(
             dict.fromkeys(
                 segment["language"]
@@ -245,8 +248,10 @@ async def upload_image(file: UploadFile = File(...)):
         else:
             detected_language = "Mixed (" + ", ".join(languages) + ")"
 
-        # 7. Confirm final audio is available
-        final_audio_path = (AUDIO_DIR / response_audio_name).resolve()
+        # 7. Validate final audio path.
+        final_audio_path = (
+            AUDIO_DIR / response_audio_name
+        ).resolve()
 
         if final_audio_path.parent != AUDIO_DIR:
             raise RuntimeError("Final audio path is invalid.")
@@ -254,7 +259,7 @@ async def upload_image(file: UploadFile = File(...)):
         if not final_audio_path.is_file():
             raise RuntimeError("Final audio file is missing.")
 
-        # 8. Processing metrics
+        # 8. Processing metrics.
         total_time = time.perf_counter() - total_start
 
         logger.info(
@@ -268,7 +273,7 @@ async def upload_image(file: UploadFile = File(...)):
             total_time,
         )
 
-        # 9. API response
+        # 9. API response.
         return {
             "status": "success",
             "request_id": request_id,
@@ -318,7 +323,6 @@ async def upload_image(file: UploadFile = File(...)):
 
 @app.get("/audio/{filename}")
 def get_audio(filename: str):
-
     # Prevent path traversal.
     if Path(filename).name != filename:
         raise HTTPException(
@@ -328,7 +332,6 @@ def get_audio(filename: str):
 
     audio_path = (AUDIO_DIR / filename).resolve()
 
-    # Ensure the resolved path remains directly inside AUDIO_DIR.
     if audio_path.parent != AUDIO_DIR:
         raise HTTPException(
             status_code=400,
